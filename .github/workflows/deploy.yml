@@ -1,0 +1,102 @@
+name: Build and Deploy to Cloud Run Job
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+env:
+  PROJECT_ID:  ${{ secrets.GCP_PROJECT_ID }}
+  REGION:      asia-southeast1         # Change to your preferred GCP region
+  AR_REPO:     rfq-automation          # Artifact Registry repository name
+  IMAGE_NAME:  rfq-processor           # Docker image name
+  JOB_NAME:    rfq-processor-job       # Cloud Run Job name
+
+jobs:
+  build-and-deploy:
+    name: Build, Push, and Deploy
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation (keyless auth)
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout source code
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Authenticate to GCP
+      #    Option A (recommended): Workload Identity Federation — keyless, no SA key stored in GitHub
+      #    Option B (fallback):    Service Account key stored as GCP_SA_KEY secret (base64-encoded JSON)
+      #
+      #    To use Option A, set up WIF first:
+      #      https://github.com/google-github-actions/auth?tab=readme-ov-file#workload-identity-federation-through-a-service-account
+      #    Then set GitHub Secrets: WIF_PROVIDER and WIF_SERVICE_ACCOUNT
+      #
+      #    To use Option B instead, replace the 'with' block below with:
+      #      credentials_json: ${{ secrets.GCP_SA_KEY }}
+      # -----------------------------------------------------------------------
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      # -----------------------------------------------------------------------
+      # 3. Set up Cloud SDK (gcloud CLI)
+      # -----------------------------------------------------------------------
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # -----------------------------------------------------------------------
+      # 4. Configure Docker to push to Artifact Registry
+      # -----------------------------------------------------------------------
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # -----------------------------------------------------------------------
+      # 5. Build and push Docker image (tagged with commit SHA for traceability)
+      # -----------------------------------------------------------------------
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:latest \
+            .
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:latest
+
+      # -----------------------------------------------------------------------
+      # 6. Update the Cloud Run Job with the new image
+      #    --set-secrets maps Secret Manager secrets to container env vars
+      #    Format: ENV_VAR_NAME=SECRET_MANAGER_SECRET_NAME:VERSION
+      # -----------------------------------------------------------------------
+      - name: Deploy to Cloud Run Job
+        run: |
+          gcloud run jobs update ${{ env.JOB_NAME }} \
+            --image=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --region=${{ env.REGION }} \
+            --set-secrets="\
+              GEMINI_API_KEY=GEMINI_API_KEY:latest,\
+              SERVICE_ACCOUNT_JSON=SERVICE_ACCOUNT_JSON:latest,\
+              GMAIL_USER_EMAIL=GMAIL_USER_EMAIL:latest,\
+              PARENT_FOLDER_ID=PARENT_FOLDER_ID:latest,\
+              SHEET_ID=SHEET_ID:latest,\
+              SEARCH_QUERY=SEARCH_QUERY:latest,\
+              PROCESSED_LABEL_NAME=PROCESSED_LABEL_NAME:latest,\
+              BATCH_SIZE=BATCH_SIZE:latest" \
+            --task-timeout=3600 \
+            --max-retries=2 \
+            --quiet
+
+      - name: Deployment summary
+        run: |
+          echo "Deployed image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "Cloud Run Job: ${{ env.JOB_NAME }} in ${{ env.REGION }}"
