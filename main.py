@@ -383,27 +383,18 @@ def rename_drive_folder(drive, folder_id: str, rfq_id: str, client_name: str):
 def _html_to_pdf_bytes(html: str) -> bytes:
     """
     Convert an HTML string to PDF bytes.
-    Tries weasyprint first (best quality, used in Docker/Linux).
-    Falls back to xhtml2pdf (pure Python, works on Windows without system libraries).
+    Tries pdfkit with wkhtmltopdf first (reliable, handles complex HTML).
+    Falls back to xhtml2pdf (pure Python, no system dependencies).
+    Finally falls back to weasyprint.
     """
     import io
 
-    # Try weasyprint (requires GTK/Pango/Cairo — available in Docker, not on bare Windows).
-    # Redirect stderr to suppress the "could not import external libraries" banner it prints
-    # to stderr before raising OSError on Windows.
+    # Try pdfkit with wkhtmltopdf (command-line tool, handles complex HTML well).
     try:
-        import sys
-        _stderr, sys.stderr = sys.stderr, io.StringIO()
-        try:
-            from weasyprint import HTML
-            result = HTML(string=html).write_pdf()
-        finally:
-            sys.stderr = _stderr
-        if result:
-            return result
+        import pdfkit
+        return pdfkit.from_string(html, False)
     except Exception:
-        # Catch all exceptions (ImportError, OSError, ValueError, etc.)
-        # Some email HTML may cause weasyprint to crash unexpectedly
+        # Catch all exceptions
         pass
 
     # Fall back to xhtml2pdf (pure Python, no system dependencies).
@@ -422,7 +413,25 @@ def _html_to_pdf_bytes(html: str) -> bytes:
         # Catch all exceptions, not just ImportError
         pass
 
-    raise RuntimeError("No PDF library available. Install weasyprint (Linux) or xhtml2pdf (Windows).")
+    # Fall back to weasyprint (requires GTK/Pango/Cairo — available in Docker, not on bare Windows).
+    # Redirect stderr to suppress the "could not import external libraries" banner it prints
+    # to stderr before raising OSError on Windows.
+    try:
+        import sys
+        _stderr, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            from weasyprint import HTML
+            result = HTML(string=html).write_pdf()
+        finally:
+            sys.stderr = _stderr
+        if result:
+            return result
+    except Exception:
+        # Catch all exceptions (ImportError, OSError, ValueError, etc.)
+        # Some email HTML may cause weasyprint to crash unexpectedly
+        pass
+
+    raise RuntimeError("No PDF library available. Install wkhtmltopdf (Linux) or xhtml2pdf (fallback).")
 
 
 def save_email_body_as_pdf(drive, message: dict, folder_id: str, index: int) -> str | None:
@@ -444,6 +453,9 @@ def save_email_body_as_pdf(drive, message: dict, folder_id: str, index: int) -> 
     if not html_body:
         plain = extract_text_from_payload(message["payload"], "text/plain")
         html_body = f"<pre>{plain}</pre>"
+
+    # Clean HTML: remove cid: image references that can't be resolved
+    html_body = re.sub(r'<img[^>]*src=["\']cid:[^"\']*["\'][^>]*>', '', html_body, flags=re.IGNORECASE)
 
     full_html = f"<h3>{subject}</h3>{html_body}"
     try:

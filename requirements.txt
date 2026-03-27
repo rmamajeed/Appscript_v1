@@ -4,4 +4,5 @@ google-api-python-client==2.127.0
 google-generativeai==0.7.2
 weasyprint==62.3
 xhtml2pdf==0.2.16
+pdfkit==1.0.0
 python-dotenv==1.0.1
