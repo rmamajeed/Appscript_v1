@@ -26,3 +26,8 @@ token*.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Local runtime artifacts
+venv_linux/
+cron_run.log
+
